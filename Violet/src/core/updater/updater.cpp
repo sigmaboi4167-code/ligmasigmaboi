@@ -135,10 +135,23 @@ bool CheckAndUpdate() {
     if (!http_get(kVersionUrl, body))
         return false; // offline or github down — just run
     std::string remote = trim(std::string(body.begin(), body.end()));
-    if (remote.empty() || remote == trim(kLocalVersion))
-        return false; // up to date
+    std::string local = trim(kLocalVersion);
+    if (remote.empty() || remote == local) {
+        Boot::ok("version", ("up to date - v" + local).c_str());
+        return false;
+    }
 
-    Boot::warn("update", ("new version " + remote + " found - downloading...").c_str());
+    Boot::warn("update", ("you're using old version v" + local + " - updating to latest v" + remote + "...").c_str());
+
+    // show what's new
+    std::vector<char> log;
+    if (http_get(kChangelogUrl, log) && !log.empty()) {
+        std::string notes = trim(std::string(log.begin(), log.end()));
+        if (notes.size() > 1500) notes.resize(1500);
+        Boot::ok("whats-new", notes.c_str());
+    }
+
+    Boot::warn("update", "downloading latest Violet.exe...");
     std::vector<char> exe;
     if (!http_get(kExeUrl, exe) || exe.size() < 1024) {
         Boot::fail("update", "download failed - running current build");

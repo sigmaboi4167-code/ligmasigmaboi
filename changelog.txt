@@ -1,0 +1,8 @@
+1.0.2
++ Update screen now calls out your old version vs the latest version
++ Changelog prints in-console before the download starts
+
+1.0.1
++ Auto-updater: Violet now checks GitHub and updates itself on launch
++ Update screen shows your old version, the latest version, and what's new
++ Windows CI builds every push into the rolling 'latest' release
