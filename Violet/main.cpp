@@ -8,6 +8,7 @@
 #include "src/core/app/app.h"
 #include "src/core/logger/logger.h"
 #include "src/core/boot/boot.h"
+#include "src/core/updater/updater.h"
 #include "src/core/games/games.h"
 #include "src/memory/memory.h"
 #include "src/core/globals/globals.h"
@@ -115,6 +116,8 @@ std::int32_t main() {
         return 0;
     }
     Boot::ok("priv", "running as administrator");
+    if (Updater::CheckAndUpdate())
+        return 0; // new binary downloaded - it relaunched itself
     std::atomic<bool> stopWatcher{false};
     std::thread watcher(stage_watcher, std::ref(stopWatcher));
     const std::int32_t code = App::Run();

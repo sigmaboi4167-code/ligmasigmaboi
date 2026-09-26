@@ -28,6 +28,7 @@
     <ClCompile Include="ext\imgui\imgui_widgets.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="src\core\app\app.cpp" />
+    <ClCompile Include="src\core\updater\updater.cpp" />
     <ClCompile Include="src\core\functions\aim\aim.cpp" />
     <ClCompile Include="src\core\functions\mics\mics.cpp" />
     <ClCompile Include="src\core\functions\movement\movement.cpp" />
@@ -78,6 +79,7 @@
     <ClInclude Include="src\core\cache\worldcache.h" />
     <ClInclude Include="src\core\cache\workspace.h" />
     <ClInclude Include="src\core\app\app.h" />
+    <ClInclude Include="src\core\updater\updater.h" />
     <ClInclude Include="src\core\functions\aim\aim.h" />
     <ClInclude Include="src\core\functions\mics\mics.h" />
     <ClInclude Include="src\core\keys\keys.h" />

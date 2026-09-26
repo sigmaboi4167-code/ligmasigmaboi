@@ -1,0 +1,27 @@
+name: windows-build
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Violet/**'
+      - 'version.txt'
+      - '.github/workflows/windows-build.yml'
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: build Release x64
+        run: msbuild Violet\Violet.vcxproj /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+      - name: stage exe
+        run: copy Violet\x64\Release\Violet.exe Violet.exe
+        shell: cmd
+      - name: publish rolling release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Violet latest
+          files: Violet.exe
