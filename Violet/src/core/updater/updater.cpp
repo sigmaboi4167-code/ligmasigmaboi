@@ -138,6 +138,7 @@ bool CheckAndUpdate() {
     std::string local = trim(kLocalVersion);
     if (remote.empty() || remote == local) {
         Boot::ok("version", ("up to date - v" + local).c_str());
+        Sleep(1500); // let it read before the boot spam scrolls past
         return false;
     }
 
@@ -149,24 +150,29 @@ bool CheckAndUpdate() {
         std::string notes = trim(std::string(log.begin(), log.end()));
         if (notes.size() > 1500) notes.resize(1500);
         Boot::ok("whats-new", notes.c_str());
+        Sleep(2500); // let it read before the download starts
     }
 
     Boot::warn("update", "downloading latest Violet.exe...");
     std::vector<char> exe;
     if (!http_get(kExeUrl, exe) || exe.size() < 1024) {
         Boot::fail("update", "download failed - running current build");
+        Sleep(2000);
         return false;
     }
     // sanity: must look like a PE
     if (exe.size() < 2 || exe[0] != 'M' || exe[1] != 'Z') {
         Boot::fail("update", "bad payload - running current build");
+        Sleep(2000);
         return false;
     }
     if (!self_swap_and_relaunch(exe)) {
         Boot::fail("update", "relaunch failed - running current build");
+        Sleep(2000);
         return false;
     }
     Boot::ok("update", "updated - restarting...");
+    Sleep(1500);
     return true;
 }
 
