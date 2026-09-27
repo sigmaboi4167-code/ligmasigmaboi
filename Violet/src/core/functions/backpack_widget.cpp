@@ -50,6 +50,8 @@
 
 #include <vector>
 
+#include <algorithm>
+
 #include <unordered_map>
 
 #include <initializer_list>
@@ -286,131 +288,56 @@ uintptr_t FindInventoryFrame(){
 
 }
 
-std::vector<std::string> CollectHotbar(){
+struct HotbarState{ std::vector<std::string> items; int equipped=-1; };
 
- static std::vector<std::string> cachedOut(6,"");
-
- static std::string cachedTargetDbg;
-
- static auto lastCollect=std::chrono::steady_clock::now()-std::chrono::seconds(1);
-
- static auto lastDbg=std::chrono::steady_clock::now()-std::chrono::seconds(1);
-
+static HotbarState CollectHotbarState(){
+ // LOCAL player only: backpack Tools + equipped Tool, stable order, equipped
+ // highlight. Never shows the aim target's bag, never blanks on a bad read.
+ static HotbarState cached; static bool have=false;
+ static auto last=std::chrono::steady_clock::now()-std::chrono::seconds(1);
  auto now=std::chrono::steady_clock::now();
-
- std::string curTargetDbg;
-
- uintptr_t curLocked=0; bool curHas=false; bool curEnabled=false;
-
- curEnabled=variables::Aimbot::enabled;
-
- curHas=Aimbot::hasTarget;
-
- curLocked=Aimbot::lockedPlayerAddr;
-
- if(curEnabled && curHas && curLocked!=0){
-
-  for(auto &pc : PlayerCache::players){ if(pc.isValid && pc.characterAddr==curLocked){ curTargetDbg=pc.name; break; } }
-
-  if(curTargetDbg.empty()) for(auto &pc : PlayerCache::players){ if(pc.isValid && pc.playerAddr==curLocked){ curTargetDbg=pc.name; break; } }
-
-  if(curTargetDbg.empty()) for(auto &pc : CbCache::players){ if(pc.isValid && (pc.characterAddr==curLocked || pc.playerAddr==curLocked || pc.rootPartAddr==curLocked)){ curTargetDbg=pc.name; break; } }
-
-  if(curTargetDbg.empty()) for(auto &pc : PfCache::players){ if(pc.isValid && pc.modelAddr==curLocked){ curTargetDbg=pc.name; break; } }
-
- }
-
- bool needUpdate = std::chrono::duration_cast<std::chrono::milliseconds>(now-lastCollect).count()>300 || curTargetDbg!=cachedTargetDbg;
-
- if(!needUpdate) return cachedOut;
-
- lastCollect=now; cachedTargetDbg=curTargetDbg;
-
- std::vector<std::string> out(6,"");
-
- std::string debugSrc="none";
-
- if(!curTargetDbg.empty()){
-
-  debugSrc="target:"+curTargetDbg;
-
-  if(Globals::players.Addr){
-
-   auto plr=Globals::players.FindChild(curTargetDbg);
-
-   if(plr.Addr){
-
-    auto backpack=plr.FindChild("Backpack");
-
-    if(backpack.Addr){
-
-     for(auto &it: backpack.GetChildList()){
-
-      if(it.Addr==0) continue;
-
-      std::string n=it.GetName(); if(n.empty()||IsHotbarJunk(n)) continue;
-
-      for(int k=0;k<6;++k) if(out[k].empty()){ out[k]=n; break; }
-
-      bool full=true; for(int k=0;k<6;++k) if(out[k].empty()) full=false; if(full) break;
-
-     }
-
-    }
-
-    auto ch=plr.GetModelRef();
-    if(ch.Addr){
-     std::vector<uintptr_t> cstack; cstack.push_back(ch.Addr);
-     std::vector<std::string> armorFallback;
-     size_t cvis=0;
-     while(!cstack.empty() && cvis<1000){
-      uintptr_t cur=cstack.back(); cstack.pop_back(); cvis++;
-      RBX::RbxInstance inst(cur);
-      if(cur!=ch.Addr){
-       std::string cls=inst.GetClass();
-       if(cls=="Model"){
-        auto h=inst.FindChild("Handle");
-        if(!h.Addr) h=inst.FindChild("Main");
-        std::string n=inst.GetName();
-        if(!n.empty() && !IsHotbarJunk(n)){
-         if(h.Addr){
-          bool already=false; for(int k=0;k<6;++k) if(out[k]==n) already=true;
-          if(!already){ for(int k=0;k<6;++k) if(out[k].empty()){ out[k]=n; break; } }
-         } else {
-          bool already=false; for(auto &a: armorFallback) if(a==n) already=true; for(int k=0;k<6;++k) if(out[k]==n) already=true;
-          if(!already) armorFallback.push_back(n);
-         }
-        }
-       } else if(cls=="Tool" || cls=="HopperBin"){
-        std::string n=inst.GetName(); if(!n.empty() && !IsHotbarJunk(n)){
-         bool already=false; for(int k=0;k<6;++k) if(out[k]==n) already=true;
-         if(!already){ for(int k=0;k<6;++k) if(out[k].empty()){ out[k]=n; break; } }
-        }
-       }
-      }
-      for(auto &cc: inst.GetChildList()) if(cc.Addr) cstack.push_back(cc.Addr);
-      bool full=true; for(int k=0;k<6;++k) if(out[k].empty()) full=false; if(full) break;
-     }
-     for(auto &n: armorFallback){
-      bool full=true; for(int k=0;k<6;++k) if(out[k].empty()) full=false; if(full) break;
-      for(int k=0;k<6;++k) if(out[k].empty()){ out[k]=n; break; }
-     }
-    }
-
+ if(have && std::chrono::duration_cast<std::chrono::milliseconds>(now-last).count()<500) return cached;
+ last=now;
+ HotbarState st;
+ std::uintptr_t lp=Globals::localPlayer.Addr;
+ if(!lp && Globals::players.Addr) lp=memory->read<std::uintptr_t>(Globals::players.Addr + Offsets::Player::LocalPlayer);
+ if(lp){
+  RBX::RbxInstance player(lp);
+  std::vector<std::string> names;
+  auto backpack=player.FindChild("Backpack");
+  if(backpack.Addr){
+   for(auto &it: backpack.GetChildList()){
+    if(!it.Addr) continue;
+    std::string n=it.GetName();
+    if(n.empty()||IsHotbarJunk(n)) continue;
+    if(std::find(names.begin(),names.end(),n)==names.end()) names.push_back(n);
    }
-
   }
-
- } else {
-
-  debugSrc="no target";
-
+  std::string eq;
+  auto ch=player.GetModelRef();
+  if(ch.Addr){
+   for(auto &c: ch.GetChildList()){ if(c.GetClass()=="Tool"){ eq=c.GetName(); break; } }
+  }
+  std::vector<std::string> merged;
+  if(have) for(auto &o: cached.items){ if(std::find(names.begin(),names.end(),o)!=names.end()) merged.push_back(o); }
+  for(auto &n: names){ if(std::find(merged.begin(),merged.end(),n)==merged.end()) merged.push_back(n); }
+  if(merged.size()>6) merged.resize(6);
+  if(!merged.empty() || !have) st.items=merged; else st=cached;
+  for(int i=0;i<(int)st.items.size();++i){ if(!eq.empty() && st.items[i]==eq){ st.equipped=i; break; } }
+  if(st.equipped<0 && !eq.empty() && !IsHotbarJunk(eq) && (int)st.items.size()<6){
+   st.items.push_back(eq); st.equipped=(int)st.items.size()-1;
+  }
+  cached=st; have=true; return st;
  }
+ if(have) return cached;
+ return st;
+}
 
-  (void)now; (void)lastDbg; (void)curHas; (void)curEnabled; (void)curLocked; (void)curTargetDbg; (void)debugSrc;
-
- cachedOut=out; return out;
-
+std::vector<std::string> CollectHotbar(){
+ HotbarState s=CollectHotbarState();
+ std::vector<std::string> o(6,"");
+ for(size_t i=0;i<s.items.size()&&i<6;++i) o[i]=s.items[i];
+ return o;
 }
 
 }
@@ -495,7 +422,7 @@ void RenderWindow(ID3D11Device* dev){
 
  ImVec2 gridMin=ImVec2(std::floor(panelMin.x + (408.f - (6*slotW+5*gap))*0.5f), std::floor(panelMin.y + (82.f-slotH)*0.5f));
 
- auto hotbar=CollectHotbar();
+ auto hbState=CollectHotbarState();
 
  for(int i=0;i<6;++i){
 
@@ -513,7 +440,8 @@ void RenderWindow(ID3D11Device* dev){
 
   draw->AddText(font,12.f*imGuiCustom::g_fontScale, sMin+ImVec2(6.f,4.f), imGuiCustom::ColorU32(ImVec4(0.5f,0.5f,0.5f,1.f)), num);
 
-  DrawHotbarItem(draw, font, sMin, slotW, slotH, hotbar[i], theme.TextBright, ImVec4(0.45f,0.45f,0.45f,1.f));
+  DrawHotbarItem(draw, font, sMin, slotW, slotH, (i<(int)hbState.items.size()?hbState.items[i]:std::string()), theme.TextBright, ImVec4(0.45f,0.45f,0.45f,1.f));
+   if(i==hbState.equipped){ draw->AddRect(sMin-ImVec2(1.f,1.f),sMax+ImVec2(1.f,1.f),imGuiCustom::ColorU32(theme.Accent),0.0f,0,1.5f); }
 
  }
 
@@ -533,7 +461,7 @@ void RenderOverlay(ImDrawList* draw, ID3D11Device* devParam){
 
  ImFont* font=imGuiCustom::GetFonts().CascadiaMonoBL?imGuiCustom::GetFonts().CascadiaMonoBL:ImGui::GetFont();
 
- auto hotbar=CollectHotbar();
+ auto hbState=CollectHotbarState();
 
  static ImVec2 ovPos=ImVec2(-1,-1); static bool ovDrag=false; static ImVec2 ovOff={0,0};
 
@@ -597,7 +525,8 @@ void RenderOverlay(ImDrawList* draw, ID3D11Device* devParam){
 
   draw->AddText(font, 12.f*imGuiCustom::g_fontScale, sMin+ImVec2(6.f,4.f), imGuiCustom::ColorU32(ImVec4(0.5f,0.5f,0.5f,1.f)), num);
 
-  DrawHotbarItem(draw, font, sMin, slotW, slotH, hotbar[i], theme.TextBright, ImVec4(0.45f,0.45f,0.45f,1.f));
+  DrawHotbarItem(draw, font, sMin, slotW, slotH, (i<(int)hbState.items.size()?hbState.items[i]:std::string()), theme.TextBright, ImVec4(0.45f,0.45f,0.45f,1.f));
+   if(i==hbState.equipped){ draw->AddRect(sMin-ImVec2(1.f,1.f),sMax+ImVec2(1.f,1.f),imGuiCustom::ColorU32(theme.Accent),0.0f,0,1.5f); }
 
  }
 

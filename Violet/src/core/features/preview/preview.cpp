@@ -1625,6 +1625,10 @@ void DrawPanel() {
         // FIX: joints were hardcoded for a 1.0-tall unit rig. Any real player.obj
         // (wide T-pose, big head, fallback avatar) made them float off the body
         // like in your screenshot. Fit them to the actual mesh AABB instead.
+        // Joints from the model's width profile, not fixed height fractions.
+        // Fixed fractions break on big heads / held items (arms spawn inside
+        // the head, legs collapse into a box). We slice the mesh into rows,
+        // find the head->shoulder width jump, the arm band and the leg split.
         float bMinX = 1e9f, bMaxX = -1e9f, bMinY = 1e9f, bMaxY = -1e9f;
         for (auto& w : g_verts) {
             if (w.x < bMinX) bMinX = w.x; if (w.x > bMaxX) bMaxX = w.x;
@@ -1634,25 +1638,109 @@ void DrawPanel() {
         const float bCx = (bMinX + bMaxX) * 0.5f;
         const float bTop = bMaxY, bBot = bMinY, bH = (bMaxY - bMinY) > 1e-6f ? (bMaxY - bMinY) : 1.0f;
         const float bW = (bMaxX - bMinX) > 1e-6f ? (bMaxX - bMinX) : 1.0f;
-        const float shX = bW * 0.27f;   // shoulder half-width tracks body width
-        const float elX = bW * 0.40f;
-        const float wrX = bW * 0.43f;
-        const float hipX = (std::min)(bW * 0.14f, 0.14f);
-        const Joint jHead   = { bCx,        bTop - bH * 0.07f, 0.00f };
-        const Joint jNeck   = { bCx,        bTop - bH * 0.20f, 0.00f };
-        const Joint jPelvis = { bCx,        bBot + bH * 0.42f, 0.00f };
-        const Joint jLSh    = { bCx - shX,  bTop - bH * 0.24f, 0.00f };
-        const Joint jLElb   = { bCx - elX,  bTop - bH * 0.38f, 0.00f };
-        const Joint jLWrist = { bCx - wrX,  bTop - bH * 0.52f, 0.00f };
-        const Joint jRSh    = { bCx + shX,  bTop - bH * 0.24f, 0.00f };
-        const Joint jRElb   = { bCx + elX,  bTop - bH * 0.38f, 0.00f };
-        const Joint jRWrist = { bCx + wrX,  bTop - bH * 0.52f, 0.00f };
-        const Joint jLHip   = { bCx - hipX, bBot + bH * 0.42f, 0.00f };
-        const Joint jLKnee  = { bCx - hipX, bBot + bH * 0.22f, 0.00f };
-        const Joint jLAnkle = { bCx - hipX, bBot + bH * 0.03f, 0.00f };
-        const Joint jRHip   = { bCx + hipX, bBot + bH * 0.42f, 0.00f };
-        const Joint jRKnee  = { bCx + hipX, bBot + bH * 0.22f, 0.00f };
-        const Joint jRAnkle = { bCx + hipX, bBot + bH * 0.03f, 0.00f };
+        constexpr int NB = 28;
+        float binMin[NB], binMax[NB];
+        int binCnt[NB] = {};
+        for (int i = 0; i < NB; ++i) { binMin[i] = 1e9f; binMax[i] = -1e9f; }
+        for (auto& w : g_verts) {
+            int b = (int)((w.y - bMinY) / bH * (float)NB);
+            if (b < 0) b = 0; if (b >= NB) b = NB - 1;
+            if (w.x < binMin[b]) binMin[b] = w.x;
+            if (w.x > binMax[b]) binMax[b] = w.x;
+            binCnt[b]++;
+        }
+        auto rowW = [&](int i) -> float {
+            if (i < 0) i = 0; if (i >= NB) i = NB - 1;
+            return binCnt[i] ? (binMax[i] - binMin[i]) : 0.0f;
+        };
+        float sw[NB];
+        for (int i = 0; i < NB; ++i) sw[i] = (rowW(i - 1) + rowW(i) + rowW(i + 1)) / 3.0f;
+        float maxW = 0.0f;
+        for (int i = 0; i < NB; ++i) if (sw[i] > maxW) maxW = sw[i];
+        if (maxW <= 1e-6f) maxW = bW;
+        const float rowH = bH / (float)NB;
+        auto rowY = [&](int i) { return bMinY + (float)i * rowH; };
+        // head bottom: first wide row scanning down from the top
+        int hb = NB - 1;
+        while (hb > 0 && sw[hb] < 0.62f * maxW) --hb;
+        const float headBotY = rowY(hb + 1);
+        // head center: mean of verts above the neck line
+        double hx = 0, hy = 0; int hn = 0;
+        for (auto& w : g_verts) if (w.y >= headBotY) { hx += w.x; hy += w.y; ++hn; }
+        const float headX = hn ? (float)(hx / hn) : bCx;
+        const float headY = hn ? (float)(hy / hn) : bTop - bH * 0.07f;
+        const float neckY = headBotY - bH * 0.015f;
+        const float shoulderY = headBotY - bH * 0.055f;
+        const float torsoW = sw[hb] > 1e-6f ? sw[hb] : maxW;
+        const float shX = torsoW * 0.40f;
+        // arms: wide band below the shoulders (T-pose hands stick out)
+        int armTop = -1, armBot = -1;
+        for (int i = hb - 1; i >= 0 && rowY(i) > bMinY + bH * 0.30f; --i) {
+            if (sw[i] > torsoW * 1.12f) { if (armTop < 0) armTop = i; armBot = i; }
+        }
+        float handLX = bCx - torsoW * 0.5f, handRX = bCx + torsoW * 0.5f, handY = shoulderY - bH * 0.16f;
+        bool haveHands = false;
+        if (armTop >= 0) {
+            float mn = 1e9f, mx = -1e9f, ys = 0; int yn = 0;
+            for (auto& w : g_verts) {
+                if (w.y <= rowY(armBot) || w.y >= rowY(armTop + 1)) continue;
+                if (w.x < mn) mn = w.x; if (w.x > mx) mx = w.x; ys += w.y; ++yn;
+            }
+            if (yn > 4 && mx > mn) { handLX = mn; handRX = mx; handY = ys / yn; haveHands = true; }
+        }
+        // legs: bottom-up cluster split (one blob -> two legs)
+        int crotch = -1;
+        for (int i = 0; i < NB && rowY(i) < bMinY + bH * 0.55f; ++i) {
+            int L = 0, R = 0, M = 0;
+            for (auto& w : g_verts) {
+                if (w.y < rowY(i) || w.y >= rowY(i + 1)) continue;
+                if (w.x < bCx - bW * 0.06f) ++L;
+                else if (w.x > bCx + bW * 0.06f) ++R;
+                else ++M;
+            }
+            if (L >= 4 && R >= 4 && M < (L < R ? L : R)) crotch = i;
+            else if (crotch >= 0) break;
+        }
+        float hipY, kneeY, ankleY, hipLX, hipRX;
+        if (crotch >= 0) {
+            hipY = rowY(crotch + 1) + bH * 0.02f;
+            double lx = 0, rx = 0; int ln = 0, rn = 0;
+            for (auto& w : g_verts) {
+                if (w.y >= rowY(crotch + 1)) continue;
+                if (w.x < bCx) { lx += w.x; ++ln; } else { rx += w.x; ++rn; }
+            }
+            hipLX = ln ? (float)(lx / ln) : bCx - bW * 0.10f;
+            hipRX = rn ? (float)(rx / rn) : bCx + bW * 0.10f;
+            kneeY = bBot + (hipY - bBot) * 0.52f;
+            ankleY = bBot + (hipY - bBot) * 0.06f;
+        } else {
+            hipY = bBot + bH * 0.42f;
+            kneeY = bBot + bH * 0.22f;
+            ankleY = bBot + bH * 0.03f;
+            hipLX = bCx - (std::min)(bW * 0.14f, 0.14f);
+            hipRX = bCx + (std::min)(bW * 0.14f, 0.14f);
+        }
+        const float elbLX = haveHands ? (bCx - shX + handLX) * 0.5f : bCx - shX * 1.05f;
+        const float elbRX = haveHands ? (bCx + shX + handRX) * 0.5f : bCx + shX * 1.05f;
+        const float elbY = haveHands ? (shoulderY + handY) * 0.5f : shoulderY - bH * 0.13f;
+        const float wriLX = haveHands ? handLX : bCx - shX * 1.05f;
+        const float wriRX = haveHands ? handRX : bCx + shX * 1.05f;
+        const float wriY = haveHands ? handY : shoulderY - bH * 0.25f;
+        const Joint jHead   = { headX,      headY,     0.00f };
+        const Joint jNeck   = { headX,      neckY,     0.00f };
+        const Joint jPelvis = { bCx,        hipY + bH * 0.01f, 0.00f };
+        const Joint jLSh    = { bCx - shX,  shoulderY, 0.00f };
+        const Joint jLElb   = { elbLX,      elbY,      0.00f };
+        const Joint jLWrist = { wriLX,      wriY,      0.00f };
+        const Joint jRSh    = { bCx + shX,  shoulderY, 0.00f };
+        const Joint jRElb   = { elbRX,      elbY,      0.00f };
+        const Joint jRWrist = { wriRX,      wriY,      0.00f };
+        const Joint jLHip   = { hipLX,      hipY,      0.00f };
+        const Joint jLKnee  = { hipLX,      kneeY,     0.00f };
+        const Joint jLAnkle = { hipLX,      ankleY,    0.00f };
+        const Joint jRHip   = { hipRX,      hipY,      0.00f };
+        const Joint jRKnee  = { hipRX,      kneeY,     0.00f };
+        const Joint jRAnkle = { hipRX,      ankleY,    0.00f };
 
         auto projJoint = [&](const Joint& j) -> ImVec2 {
             const float rx = j.x * ca + j.z * sa;

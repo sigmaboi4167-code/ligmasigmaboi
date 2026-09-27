@@ -173,7 +173,8 @@
       <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)ext\imgui;C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\cppwinrt;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <SubSystem>Console</SubSystem>
+      <SubSystem>Windows</SubSystem>
+      <EntryPointSymbol>mainCRTStartup</EntryPointSymbol>
       <GenerateDebugInformation>false</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -189,7 +190,8 @@
       <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)ext\imgui;C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\cppwinrt;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <SubSystem>Console</SubSystem>
+      <SubSystem>Windows</SubSystem>
+      <EntryPointSymbol>mainCRTStartup</EntryPointSymbol>
       <GenerateDebugInformation>false</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -203,7 +205,8 @@
       <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)ext\imgui;C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\cppwinrt;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <SubSystem>Console</SubSystem>
+      <SubSystem>Windows</SubSystem>
+      <EntryPointSymbol>mainCRTStartup</EntryPointSymbol>
       <GenerateDebugInformation>false</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -219,7 +222,8 @@
       <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)ext\imgui;C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\cppwinrt;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <SubSystem>Console</SubSystem>
+      <SubSystem>Windows</SubSystem>
+      <EntryPointSymbol>mainCRTStartup</EntryPointSymbol>
       <GenerateDebugInformation>false</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>

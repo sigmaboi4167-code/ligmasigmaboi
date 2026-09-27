@@ -1,5 +1,12 @@
 #include "launcher.h"
 #include "../updater/updater.h"
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <algorithm>
+#include "../../render/menu/library.h"
+extern unsigned char CascadiaMonoBL[];
+constexpr int kCascadiaMonoBLSize = 290368;
 #include "../../../ext/imgui/imgui.h"
 #include "../../../ext/imgui/imgui_impl_win32.h"
 #include "../../../ext/imgui/imgui_impl_dx11.h"
@@ -11,6 +18,7 @@
 #include <atomic>
 #include <mutex>
 #include <chrono>
+#include <cmath>
 
 #pragma comment(lib, "d3d11.lib")
 
@@ -71,35 +79,103 @@ struct Shared {
     std::atomic<bool> dlOk{false};
 };
 
+// Card panel exactly like the menu: CardBg fill + black outline + inner line.
+void Panel(ImDrawList* draw, const ImVec2& origin, const ImVec2& pos, const ImVec2& size) {
+    const auto& theme = imGuiCustom::GetTheme();
+    const ImVec2 min(std::floor(origin.x + pos.x), std::floor(origin.y + pos.y));
+    const ImVec2 max(min.x + std::floor(size.x), min.y + std::floor(size.y));
+    draw->AddRectFilled(min, max, imGuiCustom::ColorU32(theme.CardBg), 0.0f);
+    draw->AddRect(min, max, imGuiCustom::OutlineBlack(), 0.0f, 0, 1.0f);
+    draw->AddRect(min + ImVec2(1.0f, 1.0f), max - ImVec2(1.0f, 1.0f), imGuiCustom::OutlineInner(), 0.0f, 0, 1.0f);
+}
+
+void ShimmerTitle(ImDrawList* draw, const imGuiCustom::Fonts& fonts, const ImVec2& origin, float width) {
+    const auto& theme = imGuiCustom::GetTheme();
+    ImFont* font = fonts.CascadiaMonoBL ? fonts.CascadiaMonoBL : ImGui::GetFont();
+    const char* title = "violet.lol";
+    const float fs = 12.0f * imGuiCustom::g_fontScale;
+    const ImVec2 tsz = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, title);
+    float cx = origin.x + std::floor((width - tsz.x) * 0.5f);
+    const float ty = origin.y + 3.5f;
+    const float now = (float)ImGui::GetTime();
+    for (const char* p = title; *p; ++p) {
+        char ch[2] = {*p, 0};
+        const ImVec2 cs = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, ch);
+        const float wave = 0.5f + 0.5f * sinf(now * 2.5f - (cx - origin.x) * 0.045f);
+        draw->AddText(font, fs, ImVec2(cx, ty),
+            imGuiCustom::ColorU32(imGuiCustom::LerpColor(theme.TextBright, theme.Accent, wave * wave)), ch);
+        cx += cs.x;
+    }
+}
+
+void MenuButton(const char* label, const ImVec2& origin, const ImVec2& pos, const ImVec2& size, bool& out) {
+    const ImVec2 min(std::floor(origin.x + pos.x), std::floor(origin.y + pos.y));
+    ImGui::PushID(label);
+    ImGui::SetCursorScreenPos(min);
+    const bool pressed = ImGui::InvisibleButton("##lbtn", size);
+    const bool hovered = ImGui::IsItemHovered();
+    const ImGuiID id = ImGui::GetItemID();
+    const float hov = imGuiCustom::AnimateFloat(id, hovered, 14.0f);
+    const auto& theme = imGuiCustom::GetTheme();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(min, min + size,
+        imGuiCustom::ColorU32(imGuiCustom::LerpColor(theme.ControlBg, theme.ControlInactive, hov * 0.5f)), 0.0f);
+    draw->AddRect(min, min + size, imGuiCustom::OutlineBlack(), 0.0f, 0, 1.0f);
+    draw->AddRect(min + ImVec2(1.0f, 1.0f), min + size - ImVec2(1.0f, 1.0f), imGuiCustom::OutlineInner(), 0.0f, 0, 1.0f);
+    ImFont* font = theme.Accent.x >= 0 && imGuiCustom::GetFonts().CascadiaMonoBL
+        ? imGuiCustom::GetFonts().CascadiaMonoBL : ImGui::GetFont();
+    const float fs = 12.5f * imGuiCustom::g_fontScale;
+    const ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, label);
+    draw->AddText(font, fs,
+        ImVec2(std::floor(min.x + (size.x - ts.x) * 0.5f), std::floor(min.y + (size.y - ts.y) * 0.5f)),
+        imGuiCustom::ColorU32(imGuiCustom::LerpColor(theme.Text, theme.TextBright, hov)), label);
+    ImGui::PopID();
+    out = pressed;
+}
+
+void AccentBar(ImDrawList* draw, const ImVec2& origin, float w, float pillX, float pillW) {
+    const float pulse = 0.70f + 0.30f * (0.5f + 0.5f * sinf((float)ImGui::GetTime() * 2.2f));
+    ImVec4 bar = imGuiCustom::GetTheme().Accent;
+    bar.w *= pulse;
+    imGuiCustom::AddGlowRect(draw, origin, origin + ImVec2(w, 3.0f), imGuiCustom::ColorU32(bar), 0.9f, 6, 10.0f, 0.0f);
+    draw->AddRectFilled(origin, origin + ImVec2(w, 3.0f), imGuiCustom::ColorU32(bar), 0.0f);
+    if (pillW > 0.0f)
+        draw->AddRectFilled(ImVec2(std::floor(origin.x + pillX - pillW), std::floor(origin.y + 3.0f)),
+                            ImVec2(std::floor(origin.x + pillX + pillW), std::floor(origin.y + 5.0f)),
+                            imGuiCustom::ColorU32(imGuiCustom::GetTheme().Accent), 0.0f);
+}
+
 } // namespace
 
 bool Run() {
-    ::ShowWindow(::GetConsoleWindow(), SW_HIDE); // our UI now, not the prompt
+    ::ShowWindow(::GetConsoleWindow(), SW_HIDE);
 
-    const int W = 560, H = 480;
+    constexpr float PW = 601.0f, PH = 460.0f;
     const int sx = GetSystemMetrics(SM_CXSCREEN), sy = GetSystemMetrics(SM_CYSCREEN);
     WNDCLASSEXW wc{sizeof(wc), CS_CLASSDC, WndProc, 0, 0,
                    GetModuleHandleW(nullptr), nullptr, nullptr, nullptr, nullptr, L"violet.launcher", nullptr};
     RegisterClassExW(&wc);
-    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"violet.lol — launcher",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        (sx - W) / 2, (sy - H) / 2, W, H, nullptr, nullptr, wc.hInstance, nullptr);
-    if (!hwnd) return true; // fall back to console flow
+    RECT rc{0, 0, (LONG)PW, (LONG)PH};
+    AdjustWindowRect(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"violet.lol", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        (sx - (rc.right - rc.left)) / 2, (sy - (rc.bottom - rc.top)) / 2,
+        rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, wc.hInstance, nullptr);
+    if (!hwnd) return true;
 
     D3D d3d;
-    if (!d3d.init(hwnd, W, H)) { DestroyWindow(hwnd); UnregisterClassW(wc.lpszClassName, wc.hInstance); return true; }
+    if (!d3d.init(hwnd, (int)PW, (int)PH)) { DestroyWindow(hwnd); UnregisterClassW(wc.lpszClassName, wc.hInstance); return true; }
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
-    ImGui::StyleColorsDark();
-    ImVec4 accent(0.62f, 0.24f, 0.93f, 1.0f); // violet
-    ImGuiStyle& st = ImGui::GetStyle();
-    st.Colors[ImGuiCol_Button] = ImVec4(0.28f, 0.13f, 0.42f, 1.0f);
-    st.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.38f, 0.18f, 0.56f, 1.0f);
-    st.Colors[ImGuiCol_ButtonActive] = ImVec4(0.48f, 0.24f, 0.68f, 1.0f);
-    st.Colors[ImGuiCol_PlotHistogram] = accent;
+    ImFontConfig fcfg;
+    fcfg.FontDataOwnedByAtlas = false;
+    fcfg.OversampleH = 3;
+    fcfg.OversampleV = 3;
+    fcfg.PixelSnapH = true;
+    ImFont* menuFont = io.Fonts->AddFontFromMemoryTTF((void*)CascadiaMonoBL, kCascadiaMonoBLSize, 12.0f, &fcfg);
+    imGuiCustom::Initialize(menuFont);
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(d3d.dev, d3d.ctx);
     ShowWindow(hwnd, SW_SHOW);
@@ -110,7 +186,6 @@ bool Run() {
     bool launch = false, quit = false;
     auto doneAt = std::chrono::steady_clock::now();
 
-    // version check up front (fast, one shot)
     {
         std::string remote;
         if (Updater::FetchRemoteVersion(remote)) {
@@ -140,7 +215,6 @@ bool Run() {
         pump();
         if (quit) break;
 
-        // download finished on worker?
         if (phase == Phase::Downloading && sh.dlDone.load()) {
             if (sh.dlOk.load()) {
                 phase = Phase::Done;
@@ -153,58 +227,90 @@ bool Run() {
                 sh.status = "download failed - check connection and retry";
             }
         }
-        // hold the done screen briefly, then swap + relaunch
         if (phase == Phase::Done &&
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - doneAt).count() > 1200) {
             std::vector<char> exe;
             { std::lock_guard<std::mutex> lk(sh.mtx); exe = sh.exe; }
             Updater::InstallAndRelaunch(exe);
-            quit = true; // old binary exits, new one takes over
+            quit = true;
             break;
         }
+
+        float dt = io.DeltaTime;
+        if (dt <= 0.0f || dt > 0.1f) dt = 0.016f;
 
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
         ImGui::SetNextWindowPos(ImVec2(0, 0));
-        ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
-        ImGui::Begin("##launcher", nullptr,
-            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGui::SetNextWindowSize(ImVec2(PW, PH));
+        ImGui::Begin("violet.lol", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize);
+        const auto& theme = imGuiCustom::GetTheme();
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        const ImVec2 origin(std::floor(ImGui::GetWindowPos().x), std::floor(ImGui::GetWindowPos().y));
+        const ImVec2 winMax(origin.x + PW, origin.y + PH);
 
-        ImGui::TextColored(accent, "violet.lol");
-        ImGui::SameLine();
-        ImGui::TextDisabled("launcher");
-        ImGui::Separator();
+        // plate: WindowBg + accent glow + outlines (same as menu)
+        draw->AddRectFilled(origin, winMax, imGuiCustom::ColorU32(theme.WindowBg), 0.0f);
+        imGuiCustom::AddGlowRect(draw, origin, winMax, imGuiCustom::ColorU32(theme.Accent, 0.35f), 0.35f, 4, 6.0f, 0.0f);
+        draw->AddRect(origin, winMax, imGuiCustom::OutlineBlack(), 0.0f, 0, 1.0f);
+        draw->AddRect(origin + ImVec2(1.0f, 1.0f), winMax - ImVec2(1.0f, 1.0f), imGuiCustom::OutlineInner(), 0.0f, 0, 1.0f);
+        AccentBar(draw, origin, PW, PW * 0.5f, 22.0f);
+        ShimmerTitle(draw, imGuiCustom::GetFonts(), origin, PW);
 
+        ImFont* font = imGuiCustom::GetFonts().CascadiaMonoBL
+            ? imGuiCustom::GetFonts().CascadiaMonoBL : ImGui::GetFont();
+        const float fs = 12.5f * imGuiCustom::g_fontScale;
+
+        // version panel
+        Panel(draw, origin, ImVec2(6.0f, 40.0f), ImVec2(589.0f, 64.0f));
         {
             std::lock_guard<std::mutex> lk(sh.mtx);
-            ImGui::Text("build: v%s", Updater::kLocalVersion);
-            if (!sh.remote.empty()) ImGui::Text("latest: v%s", sh.remote.c_str());
-            ImGui::TextDisabled("%s", sh.status.c_str());
+            draw->AddText(font, fs, origin + ImVec2(16.0f, 50.0f),
+                imGuiCustom::ColorU32(theme.TextBright), ("build  v" + std::string(Updater::kLocalVersion)).c_str());
+            if (!sh.remote.empty())
+                draw->AddText(font, fs, origin + ImVec2(220.0f, 50.0f),
+                    imGuiCustom::ColorU32(theme.Accent), ("latest  v" + sh.remote).c_str());
+            else
+                draw->AddText(font, fs, origin + ImVec2(220.0f, 50.0f),
+                    imGuiCustom::ColorU32(theme.Text), "latest  ...");
+            draw->AddText(font, fs, origin + ImVec2(16.0f, 72.0f),
+                imGuiCustom::ColorU32(theme.Text), sh.status.c_str());
         }
-        ImGui::Spacing();
 
-        if (phase == Phase::HasUpdate || phase == Phase::Error || phase == Phase::Ready) {
+        // changelog panel
+        Panel(draw, origin, ImVec2(6.0f, 112.0f), ImVec2(589.0f, 218.0f));
+        draw->AddText(font, fs, origin + ImVec2(16.0f, 120.0f),
+            imGuiCustom::ColorU32(theme.TextBright), "whats new");
+        {
             std::lock_guard<std::mutex> lk(sh.mtx);
-            ImGui::Text("whats new:");
-            ImGui::BeginChild("##notes", ImVec2(0, 150), true);
-            ImGui::TextWrapped("%s", sh.notes.empty() ? "(no notes)" : sh.notes.c_str());
-            ImGui::EndChild();
-            ImGui::Spacing();
+            const char* notes = sh.notes.empty() ? "(no notes)" : sh.notes.c_str();
+            ImGui::SetCursorScreenPos(origin + ImVec2(16.0f, 142.0f));
+            ImGui::PushTextWrapPos(origin.x + 585.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, theme.Text);
+            ImGui::TextWrapped("%s", notes);
+            ImGui::PopStyleColor();
+            ImGui::PopTextWrapPos();
         }
 
+        // action row
+        bool pressed = false;
         if (phase == Phase::Checking) {
-            ImGui::Text("checking for updates...");
+            draw->AddText(font, fs, origin + ImVec2(16.0f, 348.0f),
+                imGuiCustom::ColorU32(theme.Text), "checking for updates...");
         } else if (phase == Phase::NoUpdate || phase == Phase::Ready) {
-            if (ImGui::Button("Launch Violet", ImVec2(-1, 40))) launch = true;
+            MenuButton("Launch Violet", origin, ImVec2(6.0f, 342.0f), ImVec2(589.0f, 34.0f), pressed);
+            if (pressed) launch = true;
         } else if (phase == Phase::HasUpdate || phase == Phase::Error) {
-            std::string label = phase == Phase::Error ? "Retry update" : "Update & Launch";
-            if (!sh.remote.empty() && phase == Phase::HasUpdate)
-                label = "Update to v" + sh.remote + " & Launch";
-            if (ImGui::Button(label.c_str(), ImVec2(-1, 40))) {
+            std::string label = "Retry update";
+            if (phase == Phase::HasUpdate) {
+                std::lock_guard<std::mutex> lk(sh.mtx);
+                label = sh.remote.empty() ? "Update & Launch" : ("Update to v" + sh.remote + " & Launch");
+            }
+            MenuButton(label.c_str(), origin, ImVec2(6.0f, 342.0f), ImVec2(589.0f, 34.0f), pressed);
+            if (pressed) {
                 phase = Phase::Downloading;
                 sh.dlDone.store(false);
                 sh.dlOk.store(false);
@@ -213,9 +319,7 @@ bool Run() {
                 if (dlThread.joinable()) dlThread.join();
                 dlThread = std::thread([&sh]() {
                     std::vector<char> exe;
-                    bool ok = Updater::DownloadLatest(exe, [&sh](float p) {
-                        sh.progress.store(p);
-                    });
+                    bool ok = Updater::DownloadLatest(exe, [&sh](float p) { sh.progress.store(p); });
                     std::lock_guard<std::mutex> lk(sh.mtx);
                     if (ok) sh.exe = std::move(exe);
                     sh.dlOk.store(ok);
@@ -223,25 +327,42 @@ bool Run() {
                 });
                 dlThread.detach();
             }
-            ImGui::Spacing();
-            if (ImGui::Button("Skip - launch current build", ImVec2(-1, 0))) launch = true;
+            bool skip = false;
+            MenuButton("Skip - launch current build", origin, ImVec2(6.0f, 384.0f), ImVec2(589.0f, 26.0f), skip);
+            if (skip) launch = true;
         } else if (phase == Phase::Downloading) {
-            float p = sh.progress.load();
-            if (p < 0) {
-                ImGui::Text("downloading... (size unknown)");
-                ImGui::ProgressBar(0.0f, ImVec2(-1, 0));
-            } else {
-                char buf[32];
-                std::snprintf(buf, sizeof(buf), "%d%%", (int)(p * 100.0f));
-                ImGui::ProgressBar(p, ImVec2(-1, 0), buf);
-            }
+            const float p = sh.progress.load();
+            const ImVec2 tmin(origin + ImVec2(6.0f, 348.0f));
+            const ImVec2 tmax(origin + ImVec2(595.0f, 368.0f));
+            draw->AddRectFilled(tmin, tmax, imGuiCustom::ColorU32(theme.ControlBg), 0.0f);
+            if (p >= 0.0f)
+                draw->AddRectFilled(tmin, ImVec2(tmin.x + 589.0f * p, tmax.y),
+                    imGuiCustom::ColorU32(theme.Accent), 0.0f);
+            draw->AddRect(tmin, tmax, imGuiCustom::OutlineBlack(), 0.0f, 0, 1.0f);
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%d%%", p < 0 ? 0 : (int)(p * 100.0f));
+            const ImVec2 tsz = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, buf);
+            draw->AddText(font, fs,
+                ImVec2(std::floor(tmin.x + (589.0f - tsz.x) * 0.5f), std::floor(tmin.y + (20.0f - tsz.y) * 0.5f)),
+                imGuiCustom::ColorU32(theme.TextBright), buf);
         } else if (phase == Phase::Done) {
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "restarting with the new build...");
+            draw->AddText(font, fs, origin + ImVec2(16.0f, 348.0f),
+                imGuiCustom::ColorU32(ImVec4(0.47f, 1.0f, 0.47f, 1.0f)), "restarting with the new build...");
+        }
+
+        // footer
+        draw->AddText(font, 11.0f * imGuiCustom::g_fontScale, origin + ImVec2(16.0f, 438.0f),
+            imGuiCustom::ColorU32(ImVec4(0.45f, 0.45f, 0.45f, 1.0f)), "press INSERT ingame for menu");
+        {
+            const char* v = ("v" + std::string(Updater::kLocalVersion)).c_str();
+            const ImVec2 vsz = font->CalcTextSizeA(11.0f * imGuiCustom::g_fontScale, FLT_MAX, 0.0f, v);
+            draw->AddText(font, 11.0f * imGuiCustom::g_fontScale, origin + ImVec2(PW - 16.0f - vsz.x, 438.0f),
+                imGuiCustom::ColorU32(ImVec4(0.45f, 0.45f, 0.45f, 1.0f)), v);
         }
 
         ImGui::End();
         ImGui::Render();
-        const float clear[4] = {0.07f, 0.05f, 0.10f, 1.0f};
+        const float clear[4] = {0.0f, 0.0f, 0.0f, 1.0f};
         d3d.ctx->OMSetRenderTargets(1, &d3d.rtv, nullptr);
         d3d.ctx->ClearRenderTargetView(d3d.rtv, clear);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
@@ -254,7 +375,7 @@ bool Run() {
     d3d.free();
     DestroyWindow(hwnd);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
-    return launch; // false = updated (new exe took over) or quit
+    return launch;
 }
 
 } // namespace Launcher
