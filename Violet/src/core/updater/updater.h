@@ -1,5 +1,7 @@
 #pragma once
 #include <string>
+#include <vector>
+#include <functional>
 
 namespace Updater {
 // Bump BOTH this and version.txt when shipping — CI rebuilds the exe and
@@ -12,8 +14,15 @@ inline constexpr const char* kChangelogUrl =
 inline constexpr const char* kExeUrl =
     "https://github.com/sigmaboi4167-code/ligmasigmaboi/releases/latest/download/Violet.exe";
 
-// Checks GitHub for a newer version. If one is found it downloads Violet.exe,
-// swaps it over the running binary and relaunches. Returns true when an
-// update was installed (caller should exit immediately).
+// Granular API used by the graphical launcher.
+bool FetchRemoteVersion(std::string& out); // trimmed version.txt, "" on failure
+bool FetchChangelog(std::string& out);     // trimmed + capped notes, "" on failure
+// Downloads the latest exe. progress gets 0..1 (or <0 when size unknown).
+bool DownloadLatest(std::vector<char>& exe, std::function<void(float)> progress = {});
+// Swaps the downloaded exe over the running binary and relaunches it.
+bool InstallAndRelaunch(const std::vector<char>& exe);
+
+// Legacy all-in-one console flow. Returns true if an update was installed
+// and the app should exit immediately (the new binary takes over).
 bool CheckAndUpdate();
 } // namespace Updater

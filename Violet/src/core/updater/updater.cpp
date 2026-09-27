@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <functional>
 
 #if defined(_MSC_VER)
 #pragma comment(lib, "winhttp.lib")
@@ -88,6 +89,63 @@ bool http_get(const std::string& url, std::vector<char>& out, DWORD timeout_ms =
     return ok;
 }
 
+// Same as http_get but reports 0..1 progress (or <0 when size unknown).
+bool http_get_progress(const std::string& url, std::vector<char>& out,
+                       std::function<void(float)> progress, DWORD timeout_ms = 15000) {
+    out.clear();
+    bool secure = true;
+    std::wstring host, path;
+    if (!split_url(url, secure, host, path))
+        return false;
+    HINTERNET hS = WinHttpOpen(L"violet.lol/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, nullptr, nullptr, 0);
+    if (!hS) return false;
+    WinHttpSetTimeouts(hS, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
+    HINTERNET hC = WinHttpConnect(hS, host.c_str(), secure ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT, 0);
+    if (!hC) { WinHttpCloseHandle(hS); return false; }
+    HINTERNET hR = WinHttpOpenRequest(hC, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+                                      WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0);
+    if (!hR) { WinHttpCloseHandle(hC); WinHttpCloseHandle(hS); return false; }
+    bool ok = false;
+    if (WinHttpSendRequest(hR, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        WinHttpReceiveResponse(hR, nullptr)) {
+        DWORD status = 0, len = sizeof(status);
+        if (WinHttpQueryHeaders(hR, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                nullptr, &status, &len, nullptr) && (status == 200 || status == 302 || status == 301)) {
+            if (status == 301 || status == 302) {
+                wchar_t loc[2048]{};
+                DWORD lloc = sizeof(loc);
+                if (WinHttpQueryHeaders(hR, WINHTTP_QUERY_LOCATION, nullptr, loc, &lloc, nullptr)) {
+                    WinHttpCloseHandle(hR); WinHttpCloseHandle(hC); WinHttpCloseHandle(hS);
+                    char narrow[2048]{};
+                    WideCharToMultiByte(CP_UTF8, 0, loc, -1, narrow, sizeof(narrow), nullptr, nullptr);
+                    return http_get_progress(narrow, out, progress, timeout_ms);
+                }
+            } else {
+                DWORD total = 0;
+                DWORD tlen = sizeof(total);
+                bool known = WinHttpQueryHeaders(hR, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
+                                                 nullptr, &total, &tlen, nullptr) && total > 0;
+                if (total > 0) out.reserve(total);
+                if (progress) progress(0.0f);
+                for (;;) {
+                    DWORD avail = 0;
+                    if (!WinHttpQueryDataAvailable(hR, &avail) || !avail) break;
+                    size_t old = out.size();
+                    out.resize(old + avail);
+                    DWORD rd = 0;
+                    if (!WinHttpReadData(hR, out.data() + old, avail, &rd) || !rd) { out.resize(old); break; }
+                    out.resize(old + rd);
+                    if (progress) progress(known ? (float)out.size() / (float)total : -1.0f);
+                }
+                ok = !out.empty();
+                if (ok && progress) progress(1.0f);
+            }
+        }
+    }
+    WinHttpCloseHandle(hR); WinHttpCloseHandle(hC); WinHttpCloseHandle(hS);
+    return ok;
+}
+
 bool self_swap_and_relaunch(const std::vector<char>& exe) {
     char self[MAX_PATH]{};
     if (!GetModuleFileNameA(nullptr, self, MAX_PATH)) return false;
@@ -131,12 +189,11 @@ bool self_swap_and_relaunch(const std::vector<char>& exe) {
 } // namespace
 
 bool CheckAndUpdate() {
-    std::vector<char> body;
-    if (!http_get(kVersionUrl, body))
+    std::string remote;
+    if (!FetchRemoteVersion(remote))
         return false; // offline or github down — just run
-    std::string remote = trim(std::string(body.begin(), body.end()));
     std::string local = trim(kLocalVersion);
-    if (remote.empty() || remote == local) {
+    if (remote == local) {
         Boot::ok("version", ("up to date - v" + local).c_str());
         Sleep(1500); // let it read before the boot spam scrolls past
         return false;
@@ -145,28 +202,19 @@ bool CheckAndUpdate() {
     Boot::warn("update", ("you're using old version v" + local + " - updating to latest v" + remote + "...").c_str());
 
     // show what's new
-    std::vector<char> log;
-    if (http_get(kChangelogUrl, log) && !log.empty()) {
-        std::string notes = trim(std::string(log.begin(), log.end()));
-        if (notes.size() > 1500) notes.resize(1500);
+    std::string notes;
+    if (FetchChangelog(notes) && !notes.empty())
         Boot::ok("whats-new", notes.c_str());
-        Sleep(2500); // let it read before the download starts
-    }
+    Sleep(2500); // let it read before the download starts
 
     Boot::warn("update", "downloading latest Violet.exe...");
     std::vector<char> exe;
-    if (!http_get(kExeUrl, exe) || exe.size() < 1024) {
+    if (!DownloadLatest(exe) || exe.size() < 1024) {
         Boot::fail("update", "download failed - running current build");
         Sleep(2000);
         return false;
     }
-    // sanity: must look like a PE
-    if (exe.size() < 2 || exe[0] != 'M' || exe[1] != 'Z') {
-        Boot::fail("update", "bad payload - running current build");
-        Sleep(2000);
-        return false;
-    }
-    if (!self_swap_and_relaunch(exe)) {
+    if (!InstallAndRelaunch(exe)) {
         Boot::fail("update", "relaunch failed - running current build");
         Sleep(2000);
         return false;
@@ -174,6 +222,36 @@ bool CheckAndUpdate() {
     Boot::ok("update", "updated - restarting...");
     Sleep(1500);
     return true;
+}
+
+bool FetchRemoteVersion(std::string& out) {
+    out.clear();
+    std::vector<char> body;
+    if (!http_get(kVersionUrl, body) || body.empty())
+        return false;
+    out = trim(std::string(body.begin(), body.end()));
+    return !out.empty();
+}
+
+bool FetchChangelog(std::string& out) {
+    out.clear();
+    std::vector<char> log;
+    if (!http_get(kChangelogUrl, log) || log.empty())
+        return false;
+    out = trim(std::string(log.begin(), log.end()));
+    if (out.size() > 1500) out.resize(1500);
+    return !out.empty();
+}
+
+bool DownloadLatest(std::vector<char>& exe, std::function<void(float)> progress) {
+    exe.clear();
+    if (!http_get_progress(kExeUrl, exe, progress) || exe.size() < 1024)
+        return false;
+    return exe.size() >= 2 && exe[0] == 'M' && exe[1] == 'Z';
+}
+
+bool InstallAndRelaunch(const std::vector<char>& exe) {
+    return self_swap_and_relaunch(exe);
 }
 
 } // namespace Updater
